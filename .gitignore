@@ -1,0 +1,31 @@
+# Build artifacts
+build/
+bin/
+lib/
+*.o
+*.obj
+*.d
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+.cache/
+
+# Test Data & Logs (Don't commit 1GB files!)
+*.dat
+*.log
+received_*
+download_*
+test_*
+
+# Executables (if generated outside build)
+tcp_app
+tcp_app.exeg
