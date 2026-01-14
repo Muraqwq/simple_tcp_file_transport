@@ -132,6 +132,8 @@ void run_server(int port) {
                     outFile.close();
                     receivingFile = false;
                     std::cout << "\n[Server] File received successfully!" << std::endl;
+                    // Send Confirmation back
+                    send_app_msg(conn, OP_END, "OK");
                 }
             }
         });
@@ -202,6 +204,35 @@ void upload_file(TCPConnection& conn, const std::string& filepath) {
 
     // 3. 发送 END
     send_app_msg(conn, OP_END, "");
+
+    // 等待应用层确认 (Server 必须回复 OP_END 表示写盘完成)
+    std::cout << "[Client] Waiting for Server Confirmation..." << std::endl;
+    std::vector<char> rxBuffer;
+    bool confirmed = false;
+    auto waitStart = std::chrono::steady_clock::now();
+
+    while (!confirmed) {
+        // 检查超时 (30s)
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - waitStart).count() >
+            30) {
+            std::cout << "[Client] Check confirmation timeout!" << std::endl;
+            timeout = true;
+            break;
+        }
+
+        bool ok = process_app_messages(conn, rxBuffer, [&](uint8_t op, const std::string& msg) {
+            if (op == OP_END) {
+                confirmed = true;
+                std::cout << "[Client] Server confirmed receipt." << std::endl;
+            } else if (op == OP_ERROR) {
+                std::cerr << "[Client] Server Error: " << msg << std::endl;
+                timeout = true;  // Treat as failure
+                confirmed = true;
+            }
+        });
+        if (!ok) break;
+        std::this_thread::yield();
+    }
 
     auto endTime = std::chrono::steady_clock::now();
     double duration = std::chrono::duration<double>(endTime - startTime).count();

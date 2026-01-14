@@ -57,6 +57,9 @@ public:
     // 返回读取的字节数
     size_t receive(void* buffer, size_t maxLen);
 
+    // 检查发送队列是否为空 (所有数据都已收到 ACK)
+    bool isSendComplete() const { return sendQueue.empty(); }
+
     // 获取当前状态
     TCPState getState() const { return state; }
 
