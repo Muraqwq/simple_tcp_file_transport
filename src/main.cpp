@@ -80,6 +80,7 @@ void run_server(int port) {
 
     std::ofstream outFile;
     bool receivingFile = false;
+    long long receivedBytes = 0;
     std::string currentFileName;
     std::vector<char> appBuffer;
 
@@ -89,6 +90,7 @@ void run_server(int port) {
                 currentFileName = "received_" + data.substr(data.find_last_of("/\\") + 1);
                 outFile.open(currentFileName, std::ios::binary);
                 receivingFile = true;
+                receivedBytes = 0;
                 std::cout << "[Server] Start receiving file: " << currentFileName << std::endl;
             } else if (op == OP_DOWNLOAD_REQ) {
                 std::string filePath = data.substr(data.find_last_of("/\\") + 1);
@@ -126,14 +128,16 @@ void run_server(int port) {
             } else if (op == OP_DATA) {
                 if (receivingFile && outFile.is_open()) {
                     outFile.write(data.data(), data.size());
+                    receivedBytes += data.size();
                 }
             } else if (op == OP_END) {
                 if (receivingFile) {
                     outFile.close();
                     receivingFile = false;
-                    std::cout << "\n[Server] File received successfully!" << std::endl;
-                    // Send Confirmation back
-                    send_app_msg(conn, OP_END, "OK");
+                    std::cout << "\n[Server] File received successfully! Size: " << receivedBytes << " bytes"
+                              << std::endl;
+                    // Send Confirmation back with Size
+                    send_app_msg(conn, OP_END, std::to_string(receivedBytes));
                 }
             }
         });
@@ -209,6 +213,7 @@ void upload_file(TCPConnection& conn, const std::string& filepath) {
     std::cout << "[Client] Waiting for Server Confirmation..." << std::endl;
     std::vector<char> rxBuffer;
     bool confirmed = false;
+    long long serverReceivedBytes = -1;
     auto waitStart = std::chrono::steady_clock::now();
 
     while (!confirmed) {
@@ -223,7 +228,15 @@ void upload_file(TCPConnection& conn, const std::string& filepath) {
         bool ok = process_app_messages(conn, rxBuffer, [&](uint8_t op, const std::string& msg) {
             if (op == OP_END) {
                 confirmed = true;
-                std::cout << "[Client] Server confirmed receipt." << std::endl;
+                // 解析服务器返回的字节数
+                try {
+                    serverReceivedBytes = std::stoll(msg);
+                    std::cout << "[Client] Server confirmed. Received size: " << serverReceivedBytes << " bytes."
+                              << std::endl;
+                } catch (...) {
+                    serverReceivedBytes = -1;
+                    std::cout << "[Client] Server confirmed (No size info)." << std::endl;
+                }
             } else if (op == OP_ERROR) {
                 std::cerr << "[Client] Server Error: " << msg << std::endl;
                 timeout = true;  // Treat as failure
@@ -243,27 +256,17 @@ void upload_file(TCPConnection& conn, const std::string& filepath) {
     std::cout << "  - Sent: " << (totalBytes / 1024.0) << " KB" << std::endl;
     std::cout << "  - Speed: " << speed << " KB/s" << std::endl;
 
-    // 4. 校验 (仅在未超时且都在本地时)
+    // 4. 校验
     std::string verifyResult = "Skipped";
     if (!timeout) {
-        // 给他一点时间写盘
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-
-        std::ifstream s1(filepath, std::ios::binary | std::ios::ate);
-        std::ifstream s2(recvFilename, std::ios::binary | std::ios::ate);
-        if (s1.tellg() != s2.tellg()) {
-            std::cout << "  - Verification: FAIL (Size Mismatch: " << s1.tellg() << " vs " << s2.tellg() << ")"
+        std::cout << "  - Verification (Remote): ";
+        if (serverReceivedBytes == totalBytes) {
+            std::cout << "PASS (Size Match)" << std::endl;
+            verifyResult = "PASS_REMOTE";
+        } else {
+            std::cout << "FAIL (Size Mismatch: Sent " << totalBytes << " vs Recv " << serverReceivedBytes << ")"
                       << std::endl;
             verifyResult = "FAIL_SIZE";
-        } else {
-            // Size Match, check content
-            if (check_files_equal(filepath, recvFilename)) {
-                verifyResult = "PASS";
-                std::cout << "  - Verification: PASS" << std::endl;
-            } else {
-                verifyResult = "FAIL_CONTENT";
-                std::cout << "  - Verification: FAIL (Content Mismatch)" << std::endl;
-            }
         }
     } else {
         verifyResult = "Timeout";
