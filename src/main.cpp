@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cstddef>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -69,6 +70,26 @@ bool process_app_messages(TCPConnection& conn, std::vector<char>& appBuffer,
     return true;  // No data received is also "continue"
 }
 
+// Helper: 打印简单进度条
+void print_progress(long long current, long long total) {
+    if (total <= 0) return;
+    double progress = (double)current / total;
+    int barWidth = 50;
+
+    std::cout << "\r[";
+    int pos = barWidth * progress;
+    for (int i = 0; i < barWidth; ++i) {
+        if (i < pos)
+            std::cout << "=";
+        else if (i == pos)
+            std::cout << ">";
+        else
+            std::cout << " ";
+    }
+    std::cout << "] " << int(progress * 100.0) << " % (" << (current / 1024) << " KB / " << (total / 1024) << " KB)"
+              << std::flush;
+}
+
 void run_server(int port) {
     TCPConnection conn;
     if (!conn.bind(port)) {
@@ -82,16 +103,36 @@ void run_server(int port) {
     bool receivingFile = false;
     long long receivedBytes = 0;
     std::string currentFileName;
+    long long totalExpectedBytes = 0;
     std::vector<char> appBuffer;
 
     while (true) {
         bool ok = process_app_messages(conn, appBuffer, [&](uint8_t op, const std::string& data) {
             if (op == OP_UPLOAD_REQ) {
-                currentFileName = "received_" + data.substr(data.find_last_of("/\\") + 1);
+                // Format: filename|filesize
+                std::string payload = data;
+                std::string sizeStr = "0";
+                size_t sep = payload.find('|');
+                if (sep != std::string::npos) {
+                    currentFileName = "received_" + payload.substr(0, sep);
+                    // filename might vary, ensure basename
+                    currentFileName = "received_" + currentFileName.substr(currentFileName.find_last_of("/\\") + 1);
+                    sizeStr = payload.substr(sep + 1);
+                } else {
+                    currentFileName = "received_" + payload.substr(payload.find_last_of("/\\") + 1);
+                }
+
+                try {
+                    totalExpectedBytes = std::stoll(sizeStr);
+                } catch (...) {
+                    totalExpectedBytes = 0;
+                }
+
                 outFile.open(currentFileName, std::ios::binary);
                 receivingFile = true;
                 receivedBytes = 0;
-                std::cout << "[Server] Start receiving file: " << currentFileName << std::endl;
+                std::cout << "[Server] Start receiving file: " << currentFileName << " (Size: " << totalExpectedBytes
+                          << " bytes)" << std::endl;
             } else if (op == OP_DOWNLOAD_REQ) {
                 std::string filePath = data.substr(data.find_last_of("/\\") + 1);
                 std::cout << "[Server] Start uploading file " << filePath << std::endl;
@@ -101,6 +142,14 @@ void run_server(int port) {
                     send_app_msg(conn, OP_ERROR, "File not found");
                     return;
                 }
+
+                // Get file size
+                file.seekg(0, std::ios::end);
+                long long fileSize = file.tellg();
+                file.seekg(0, std::ios::beg);
+
+                // Send OP_FILE_INFO first
+                send_app_msg(conn, OP_FILE_INFO, std::to_string(fileSize));
 
                 auto startTime = std::chrono::steady_clock::now();
                 char readBuf[1024];
@@ -119,9 +168,10 @@ void run_server(int port) {
                     conn.update();
                     totalBytes += chunk.size();
 
-                    if (totalBytes % (1024 * 50) == 0)  // log
-                        std::cout << "\r[Server] Sending " << (totalBytes / 1024) << " KB..." << std::flush;
+                    if (totalBytes % (1024 * 10) == 0)  // Update progress every 10KB
+                        print_progress(totalBytes, fileSize);
                 }
+                print_progress(totalBytes, fileSize);  // Final ensure
                 std::cout << std::endl;
                 send_app_msg(conn, OP_END, "");
 
@@ -129,12 +179,17 @@ void run_server(int port) {
                 if (receivingFile && outFile.is_open()) {
                     outFile.write(data.data(), data.size());
                     receivedBytes += data.size();
+                    if (totalExpectedBytes > 0 && receivedBytes % (1024 * 10) == 0) {
+                        print_progress(receivedBytes, totalExpectedBytes);
+                    }
                 }
             } else if (op == OP_END) {
                 if (receivingFile) {
+                    print_progress(receivedBytes, totalExpectedBytes > 0 ? totalExpectedBytes : receivedBytes);
+                    std::cout << std::endl;
                     outFile.close();
                     receivingFile = false;
-                    std::cout << "\n[Server] File received successfully! Size: " << receivedBytes << " bytes"
+                    std::cout << "[Server] File received successfully! Size: " << receivedBytes << " bytes"
                               << std::endl;
                     // Send Confirmation back with Size
                     send_app_msg(conn, OP_END, std::to_string(receivedBytes));
@@ -177,8 +232,13 @@ void upload_file(TCPConnection& conn, const std::string& filepath) {
     std::string recvFilename = "received_" + filename;
 
     // 1. 发送 Upload Request
-    std::cout << "[Client] Uploading " << filepath << " (Max 180s)..." << std::endl;
-    send_app_msg(conn, OP_UPLOAD_REQ, filepath);
+    file.seekg(0, std::ios::end);
+    long long fileSize = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::cout << "[Client] Uploading " << filepath << " (Size: " << fileSize << " bytes)..." << std::endl;
+    // Send "filename|filesize"
+    send_app_msg(conn, OP_UPLOAD_REQ, filename + "|" + std::to_string(fileSize));
 
     // 2. 发送 Data (Benchmarking)
     auto startTime = std::chrono::steady_clock::now();
@@ -201,9 +261,9 @@ void upload_file(TCPConnection& conn, const std::string& filepath) {
         conn.update();
         totalBytes += chunk.size();
 
-        if (totalBytes % (1024 * 50) == 0)  // Reduce logging frequency
-            std::cout << "\r[Client] Sent " << (totalBytes / 1024) << " KB..." << std::flush;
+        if (totalBytes % (1024 * 10) == 0) print_progress(totalBytes, fileSize);
     }
+    print_progress(totalBytes, fileSize);
     std::cout << std::endl;
 
     // 3. 发送 END

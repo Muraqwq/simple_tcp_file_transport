@@ -41,6 +41,7 @@ struct AppHeader {
 #define OP_ACK 4         // 应用层确认 (Payload = 状态信息，可选)
 #define OP_DOWNLOAD_REQ 5
 #define OP_ERROR 6
+#define OP_FILE_INFO 7  // 文件信息 (Payload = 文件大小字符串)
 
 // 最大的数据包大小 (MTU 限制通常是 1500，减去 IP/UDP 头，安全值设为 1400 左右)
 const int MAX_PACKET_SIZE = 1400;

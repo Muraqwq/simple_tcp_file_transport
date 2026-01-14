@@ -170,7 +170,7 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
 
             if (ack == snd_una) {
                 if (len == 0 && ++dup_ack_cnt >= MAX_DUP_CNT) {
-                    std::cout << "[TCP] Fast Retransmit: seq=" << snd_una << std::endl;
+                    // std::cout << "[TCP] Fast Retransmit: seq=" << snd_una << std::endl;
 
                     if (!sendQueue.empty()) {
                         auto& seg = sendQueue.front();
