@@ -7,6 +7,12 @@
 #include <thread>
 #include <vector>
 
+
+#ifndef __APPLE__
+#include <cstring>     // 提供 memcpy
+#include <functional>  // 提供 std::function
+#endif
+
 #include "tcp_connection.h"
 #include "tcp_protocol.h"
 
