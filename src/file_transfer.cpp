@@ -190,6 +190,14 @@ void run_server(int port) {
                 }
                 print_progress(totalBytes, fileSize);
                 std::cout << std::endl;
+
+                auto endTime = std::chrono::steady_clock::now();
+                double duration = std::chrono::duration<double>(endTime - startTime).count();
+                if (duration > 0) {
+                    double speed = (totalBytes / 1024.0) / duration;
+                    std::cout << "[Server] Upload (Download for client) finished. Speed: " << speed << " KB/s"
+                              << std::endl;
+                }
                 send_app_msg(conn, OP_END, "");
 
             } else if (op == OP_DATA) {
@@ -352,6 +360,7 @@ void download_file(TCPConnection& conn, const std::string& filename) {
     long long totalBytesRecv = 0;
     long long totalExpectedSize = 0;
     bool done = false;
+    auto startTime = std::chrono::steady_clock::now();
 
     // Wait for response
     while (!done) {
@@ -365,6 +374,7 @@ void download_file(TCPConnection& conn, const std::string& filename) {
                 std::cout << "[Client] File size: " << totalExpectedSize << " bytes" << std::endl;
                 outFile.open("downloaded_" + filename, std::ios::binary);
                 receiving = true;
+                startTime = std::chrono::steady_clock::now();  // Restart timer when data starts
             } else if (op == OP_DATA) {
                 if (receiving && outFile.is_open()) {
                     outFile.write(data.data(), data.size());
@@ -378,11 +388,19 @@ void download_file(TCPConnection& conn, const std::string& filename) {
                     receiving = true;
                     outFile.write(data.data(), data.size());
                     totalBytesRecv += data.size();
+                    startTime = std::chrono::steady_clock::now();  // Restart timer
                 }
             } else if (op == OP_END) {
                 print_progress(totalBytesRecv, totalExpectedSize > 0 ? totalExpectedSize : totalBytesRecv);
                 std::cout << std::endl;
+
+                auto endTime = std::chrono::steady_clock::now();
+                double duration = std::chrono::duration<double>(endTime - startTime).count();
+                double speed = (duration > 0) ? (totalBytesRecv / 1024.0) / duration : 0;
+
                 std::cout << "[Client] Download complete! Saved to downloaded_" << filename << std::endl;
+                std::cout << "  - Duration: " << duration << " s" << std::endl;
+                std::cout << "  - Speed: " << speed << " KB/s" << std::endl;
                 done = true;
             } else if (op == OP_ERROR) {
                 std::cerr << "[Client] Error: " << data << std::endl;
