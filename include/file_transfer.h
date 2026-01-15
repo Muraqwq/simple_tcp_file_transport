@@ -1,6 +1,11 @@
 #ifndef FILE_TRANSFER_H
 #define FILE_TRANSFER_H
 
+#ifndef __APPLE__
+#include <cstring>     // 提供 memcpy
+#include <functional>  // 提供 std::function
+#endif
+
 #include <string>
 
 #include "tcp_connection.h"
