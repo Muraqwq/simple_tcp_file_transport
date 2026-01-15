@@ -1,5 +1,7 @@
 #include "tcp_connection.h"
 
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -11,7 +13,7 @@
 TCPConnection::TCPConnection() : state(CLOSED), snd_una(0), snd_nxt(0), rcv_nxt(0) {
     srand(time(nullptr));
     socket.create();
-    socket.setNonBlocking(true);
+    socket.set_non_blocking(true);
 }
 
 TCPConnection::~TCPConnection() { socket.close(); }
@@ -26,28 +28,27 @@ bool TCPConnection::bind(int port) {
 }
 
 bool TCPConnection::connect(const std::string& ip, int port) {
-    peerIp = ip;
-    peerPort = port;
+    peer_ip = ip;
+    peer_port = port;
 
     // TODO: 实现第一次握手
     // 1. 设置标志位 SYN
     // 2. 发送包
     // 3. 状态变更为 SYN_SENT
-    // sendPacket(FLAG_SYN);
-    // state = SYN_SENT;
-    sendPacket(FLAG_SYN);
+    // 3. 状态变更为 SYN_SENT
+    send_packet(FLAG_SYN);
     state = SYN_SENT;
     return true;
 }
 
 void TCPConnection::update() {
     char buffer[MAX_PACKET_SIZE];
-    std::string srcIp;
-    int srcPort;
+    std::string src_ip;
+    int src_port;
 
     // 循环收取所有到达的包 (Drain the socket)
     while (true) {
-        int bytes = socket.recvFrom(buffer, MAX_PACKET_SIZE, srcIp, srcPort);
+        int bytes = socket.recv_from(buffer, MAX_PACKET_SIZE, src_ip, src_port);
         if (bytes <= 0) break;  // 读完了 (EAGAIN)
 
         // 解析 Header
@@ -56,17 +57,17 @@ void TCPConnection::update() {
         TCPHeader* header = (TCPHeader*)buffer;
 
         // 0. 校验和检查
-        if (calculateChecksum(buffer, bytes) != 0) {
+        if (calculate_checksum(buffer, bytes) != 0) {
             // std::cout << "[TCP] Checksum failed! Dropping packet." << std::endl;
             continue;
         }
 
         // 调用状态机
-        processPacket(*header, buffer + sizeof(TCPHeader), bytes - sizeof(TCPHeader), srcIp, srcPort);
+        process_packet(*header, buffer + sizeof(TCPHeader), bytes - sizeof(TCPHeader), src_ip, src_port);
     }
 
     // 检查重传
-    checkTimeout();
+    check_timeout();
 }
 
 std::string stateToString(TCPState state) {
@@ -107,8 +108,8 @@ std::string flagsToString(uint8_t flags) {
     return s;
 }
 
-void TCPConnection::processPacket(const TCPHeader& header, const char* data, int len, const std::string& srcIp,
-                                  int srcPort) {
+void TCPConnection::process_packet(const TCPHeader& header, const char* data, int len, const std::string& src_ip,
+                                   int src_port) {
     // 转换网络字节序为主机字节序
     uint32_t seqNum = ntohl(header.seq_num);
     uint32_t ackNum = ntohl(header.ack_num);
@@ -127,9 +128,9 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
             // TODO: Server 收到 SYN -> 发送 SYN+ACK -> 变为 SYN_RCVD
             // if (header.flags & FLAG_SYN) ...
             if (codeFlags & FLAG_SYN) {
-                peerIp = srcIp;
-                peerPort = srcPort;
-                sendPacket(FLAG_SYN | FLAG_ACK, data, len);
+                peer_ip = src_ip;
+                peer_port = src_port;
+                send_packet(FLAG_SYN | FLAG_ACK, data, len);
                 state = SYN_RCVD;
             }
             break;
@@ -137,7 +138,7 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
         case SYN_SENT:
             // TODO: Client 收到 SYN+ACK -> 发送 ACK -> 变为 ESTABLISHED
             if (codeFlags & (FLAG_SYN | FLAG_ACK)) {
-                sendPacket(FLAG_ACK, data, len);
+                send_packet(FLAG_ACK, data, len);
                 state = ESTABLISHED;
             }
             break;
@@ -154,12 +155,12 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
             uint32_t ack = ackNum;  // 使用已转换的本地变量
             if (ack > snd_una) {
                 // 累积确认：清理掉所有 seq + len <= ack 的包
-                while (!sendQueue.empty()) {
-                    auto& head = sendQueue.front();
+                while (!send_queue.empty()) {
+                    auto& head = send_queue.front();
                     uint32_t endSeq = head.seq + head.len;
                     // 注意：序列号回绕 (Wrap Around) 先不考虑，假设足够大
                     if (endSeq <= ack) {
-                        sendQueue.pop_front();
+                        send_queue.pop_front();
                     } else {
                         break;
                     }
@@ -172,10 +173,10 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
                 if (len == 0 && ++dup_ack_cnt >= MAX_DUP_CNT) {
                     // std::cout << "[TCP] Fast Retransmit: seq=" << snd_una << std::endl;
 
-                    if (!sendQueue.empty()) {
-                        auto& seg = sendQueue.front();
+                    if (!send_queue.empty()) {
+                        auto& seg = send_queue.front();
                         if (seg.seq == snd_una) {
-                            sendPacket(seg.data.data(), seg.len, seg.seq);
+                            send_packet(seg.data.data(), seg.len, seg.seq);
                         }
                     }
                     dup_ack_cnt = 0;  // 为了简单，重传后可以清零
@@ -193,24 +194,25 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
                     // 正好是期望的包 (seq == rcv_nxt)
                     if (get_window_size() < len * sizeof(char)) {
                         // 接收窗口不足，丢弃包，但必须回复 ACK 告诉对方现在的窗口大小
-                        sendPacket(FLAG_ACK);
+                        // 接收窗口不足，丢弃包，但必须回复 ACK 告诉对方现在的窗口大小
+                        send_packet(FLAG_ACK);
                         return;
                     }
                     const char* p = static_cast<const char*>(data);
-                    inBuffer.insert(inBuffer.end(), p, p + len);
+                    in_buffer.insert(in_buffer.end(), p, p + len);
                     rcv_nxt += len;
 
                     // 检查乱序缓冲里有没有能接上的
-                    auto it = outOfOrderBuffer.begin();
-                    while (it != outOfOrderBuffer.end()) {
+                    auto it = out_of_order_buffer.begin();
+                    while (it != out_of_order_buffer.end()) {
                         int32_t bufDiff = (int32_t)(it->first - rcv_nxt);
 
                         if (bufDiff == 0) {
                             if (get_window_size() < it->second.size() * sizeof(char)) break;
-                            inBuffer.insert(inBuffer.end(), it->second.begin(), it->second.end());
+                            in_buffer.insert(in_buffer.end(), it->second.begin(), it->second.end());
                             rcv_nxt += it->second.size();
 
-                            it = outOfOrderBuffer.erase(it);
+                            it = out_of_order_buffer.erase(it);
                         } else if (bufDiff < 0) {
                             // 这是一个已经处理过的包 (Partially overlapping or Duplicate)
                             // 简单起见，如果它完全被 rcv_nxt 覆盖，直接删除
@@ -218,7 +220,7 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
                             int32_t endDiff = (int32_t)(endOfPkt - rcv_nxt);
 
                             if (endDiff <= 0) {
-                                it = outOfOrderBuffer.erase(it);
+                                it = out_of_order_buffer.erase(it);
                             } else {
                                 // 部分重叠：裁剪头部
                                 // 由于 bufDiff < 0, overlapStart = rcv_nxt
@@ -227,11 +229,11 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
                                 if (overlap < it->second.size()) {
                                     std::vector<char> remainingData(it->second.begin() + overlap, it->second.end());
                                     // 插入 remaining
-                                    inBuffer.insert(inBuffer.end(), remainingData.begin(), remainingData.end());
+                                    in_buffer.insert(in_buffer.end(), remainingData.begin(), remainingData.end());
                                     rcv_nxt += remainingData.size();
-                                    it = outOfOrderBuffer.erase(it);
+                                    it = out_of_order_buffer.erase(it);
                                 } else {
-                                    it = outOfOrderBuffer.erase(it);
+                                    it = out_of_order_buffer.erase(it);
                                 }
                             }
                         } else {
@@ -239,26 +241,78 @@ void TCPConnection::processPacket(const TCPHeader& header, const char* data, int
                         }
                     }
                     // 只有真的收到了数据才回复 ACK
-                    sendPacket(FLAG_ACK);
+                    send_packet(FLAG_ACK);
                 } else if (diff > 0) {
                     // 未来的包（乱序），存起来
                     std::vector<char> data_vec(data, data + len);
-                    outOfOrderBuffer[seq] = data_vec;
+                    out_of_order_buffer[seq] = data_vec;
                     // 回复我们期望的 seq (即 rcv_nxt)，触发对方快重传
-                    sendPacket(FLAG_ACK);
+                    send_packet(FLAG_ACK);
                 }
                 // diff < 0 的是重复包，直接丢弃，但也要回 ACK 确认
                 else {
-                    sendPacket(FLAG_ACK);
+                    send_packet(FLAG_ACK);
                 }
+            } else if (codeFlags & FLAG_FIN) {
+                // TODO: 处理对端发送的 FIN
+                // 1. 回复 ACK
+                // 2. 状态变更: ESTABLISHED -> CLOSE_WAIT
+                // 3. (可选) 通知应用层
+                send_packet(FLAG_ACK);
+                state = CLOSE_WAIT;
             }
         } break;
+
+        case FIN_WAIT_1: {
+            if ((header.flags & FLAG_FIN) && (header.flags & FLAG_ACK)) {
+                state = TIME_WAIT;
+            } else if (header.flags & FLAG_FIN) {
+                state = CLOSING;
+                send_packet(FLAG_ACK);
+            } else if (header.flags & FLAG_ACK) {
+                state = FIN_WAIT_2;
+            }
+        } break;
+
+        case FIN_WAIT_2: {
+            if (header.flags & FLAG_FIN) {
+                state = TIME_WAIT;
+                send_packet(FLAG_ACK);
+            }
+        } break;
+
+        case CLOSING: {
+            if (header.flags & FLAG_ACK) {
+                state = TIME_WAIT;
+            }
+        } break;
+
+        case TIME_WAIT: {
+            // MSL 听说是内核设置，这里我需要做吗。先不做了
+            sleep(2000);
+            reset();
+            state = CLOSED;
+        }
+
+        case CLOSE_WAIT: {
+            // 我觉得 主动断开连接后，两边都不应该发除了 fin or fin_ack ack 的数据包。
+            // 所以在被动关闭的这方，不应该继续发包了，应该等待 in_buffer 接收完后，返回 fin。
+            // 所以我使用 while 循环，直接将接收方的程序阻塞在这里。
+
+        } break;
+
+        case LAST_ACK: {
+            if (header.flags & FLAG_ACK) {
+                close();
+            }
+        } break;
+
         default:
             break;
     }
 }
 
-void TCPConnection::sendPacket(uint8_t flags, const char* data, int len) {
+void TCPConnection::send_packet(uint8_t flags, const char* data, int len) {
     TCPHeader header;
     memset(&header, 0, sizeof(header));
 
@@ -276,15 +330,15 @@ void TCPConnection::sendPacket(uint8_t flags, const char* data, int len) {
         memcpy(packet.data() + sizeof(TCPHeader), data, len);
     }
 
-    header.checksum = calculateChecksum(packet.data(), packet.size());
+    header.checksum = calculate_checksum(packet.data(), packet.size());
     TCPHeader* h = (TCPHeader*)packet.data();
     h->checksum = header.checksum;
 
-    socket.sendTo(packet.data(), packet.size(), peerIp, peerPort);
+    socket.send_to(packet.data(), packet.size(), peer_ip, peer_port);
 }
 
 // 重载：指定 Seq 发送数据包 (用于重传/Sliding Window)
-void TCPConnection::sendPacket(const char* data, int len, uint32_t seq) {
+void TCPConnection::send_packet(const char* data, int len, uint32_t seq) {
     TCPHeader header;
     memset(&header, 0, sizeof(header));
 
@@ -301,14 +355,14 @@ void TCPConnection::sendPacket(const char* data, int len, uint32_t seq) {
         memcpy(packet.data() + sizeof(TCPHeader), data, len);
     }
 
-    header.checksum = calculateChecksum(packet.data(), packet.size());
+    header.checksum = calculate_checksum(packet.data(), packet.size());
     TCPHeader* h = (TCPHeader*)packet.data();
     h->checksum = header.checksum;
 
-    socket.sendTo(packet.data(), packet.size(), peerIp, peerPort);
+    socket.send_to(packet.data(), packet.size(), peer_ip, peer_port);
 }
 
-uint16_t TCPConnection::calculateChecksum(const void* data, size_t len) {
+uint16_t TCPConnection::calculate_checksum(const void* data, size_t len) {
     const uint16_t* ptr = (const uint16_t*)data;
     uint32_t sum = 0;
 
@@ -351,10 +405,10 @@ bool TCPConnection::send(const void* data, size_t len) {
 
     // 构造段，使用当前的 snd_nxt
     SendSegment segment{snd_nxt, uint32_t(len), data_vec, std::chrono::steady_clock::now()};
-    sendQueue.emplace_back(segment);
+    send_queue.emplace_back(segment);
 
     // 发送 (使用带 seq 的重载)
-    sendPacket(segment.data.data(), len, segment.seq);
+    send_packet(segment.data.data(), len, segment.seq);
 
     // 推进 snd_nxt
     snd_nxt += len;
@@ -362,40 +416,79 @@ bool TCPConnection::send(const void* data, size_t len) {
     return true;
 }
 
-void TCPConnection::checkTimeout() {
+void TCPConnection::check_timeout() {
     auto current_time = std::chrono::steady_clock::now();
 
     // 必须用引用 auto&，否则修改无效！
-    for (auto& seg : sendQueue) {
-        auto pass_time = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - seg.lastSendTime).count();
+    for (auto& seg : send_queue) {
+        auto pass_time =
+            std::chrono::duration_cast<std::chrono::milliseconds>(current_time - seg.last_send_time).count();
         if (pass_time >= RTO) {
             // std::cout << "[TCP] Timeout! Retransmit seq=" << seg.seq << " len=" << seg.len << std::endl;
             // 重传：必须使用当时原本的 SEQ
-            sendPacket(seg.data.data(), seg.len, seg.seq);
+            send_packet(seg.data.data(), seg.len, seg.seq);
 
-            seg.lastSendTime = current_time;
+            seg.last_send_time = current_time;
             seg.retries++;
         }
     }
 }
 
 size_t TCPConnection::receive(void* buffer, size_t maxLen) {
-    if (inBuffer.empty()) return 0;
+    if (in_buffer.empty()) {
+        // 如果buffer空了，而且处于 CLOSE_WAIT，说明对方发过 FIN 了，我们也读完了
+        if (state == CLOSE_WAIT) {
+            return -1;  // EOF 信号
+        }
+        return 0;
+    }
 
-    size_t copyLen = std::min(maxLen, inBuffer.size());
-    std::copy(inBuffer.begin(), inBuffer.begin() + copyLen, (char*)buffer);
+    size_t copyLen = std::min(maxLen, in_buffer.size());
+    std::copy(in_buffer.begin(), in_buffer.begin() + copyLen, (char*)buffer);
 
     // 移除已读取的数据
     auto old_window_size = get_window_size();
-    inBuffer.erase(inBuffer.begin(), inBuffer.begin() + copyLen);
+    in_buffer.erase(in_buffer.begin(), in_buffer.begin() + copyLen);
     auto new_window_size = get_window_size();
 
     // Clark算法简化版：或者从 0 变有，或者腾出了显著空间 (MSS)
     if (old_window_size == 0 && new_window_size > 0) {
-        sendPacket(FLAG_ACK);
+        send_packet(FLAG_ACK);
     } else if (new_window_size - old_window_size >= 1400) {
-        sendPacket(FLAG_ACK);
+        send_packet(FLAG_ACK);
     }
 
     return copyLen;
+}
+
+void TCPConnection::close() {
+    // 1. 发送 FIN 包
+    send_packet(FLAG_FIN | FLAG_ACK);
+
+    // 2. 状态变更
+    if (state == ESTABLISHED) {
+        state = FIN_WAIT_1;  // 主动关闭
+    } else if (state == CLOSE_WAIT) {
+        state = LAST_ACK;  // 被动关闭
+    }
+}
+
+void TCPConnection::reset() {
+    // TODO: 实现状态重置逻辑 (用于 Server 重用 Connection)
+    // 1. 清空发送/接收队列
+    // 2. 重置 seq, ack, window 等变量
+    // 3. state = LISTEN
+    in_buffer.clear();
+    send_queue.clear();
+    out_of_order_buffer.clear();
+    snd_una = 0;
+    snd_nxt = 0;
+    rcv_nxt = 0;
+    dup_ack_cnt = 0;
+    rwnd = MAX_RWND;
+
+    peer_ip = {};
+    peer_port = {};
+
+    state = LISTEN;
 }

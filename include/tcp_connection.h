@@ -2,6 +2,7 @@
 #define TCP_CONNECTION_H
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -16,7 +17,7 @@ struct SendSegment {
     uint32_t seq;
     uint32_t len;
     std::vector<char> data;
-    std::chrono::steady_clock::time_point lastSendTime;
+    std::chrono::steady_clock::time_point last_send_time;
     int retries = 0;
 };
 
@@ -31,7 +32,8 @@ enum TCPState {
     FIN_WAIT_2,
     TIME_WAIT,
     CLOSE_WAIT,
-    LAST_ACK
+    LAST_ACK,
+    CLOSING
 };
 
 class TCPConnection {
@@ -58,45 +60,51 @@ public:
     size_t receive(void* buffer, size_t maxLen);
 
     // 检查发送队列是否为空 (所有数据都已收到 ACK)
-    bool isSendComplete() const { return sendQueue.empty(); }
+    bool is_send_complete() const { return send_queue.empty(); }
 
     // 获取当前状态
-    TCPState getState() const { return state; }
+    TCPState get_state() const { return state; }
+
+    // 断开连接 (发送 FIN)
+    void close();
+
+    // 重置状态 (用于 Server 重新进入 LISTEN)
+    void reset();
 
 private:
     // 状态机处理函数
-    void processPacket(const TCPHeader& header, const char* data, int len, const std::string& srcIp, int srcPort);
+    void process_packet(const TCPHeader& header, const char* data, int len, const std::string& src_ip, int src_port);
 
     // 检查是否超时重传
-    void checkTimeout();
+    void check_timeout();
 
     // 发送包的辅助函数
-    void sendPacket(uint8_t flags, const char* data = nullptr, int len = 0);
+    void send_packet(uint8_t flags, const char* data = nullptr, int len = 0);
     // 重载：指定 Seq 发送数据包 (用于重传/Sliding Window)
-    void sendPacket(const char* data, int len, uint32_t seq);
+    void send_packet(const char* data, int len, uint32_t seq);
 
-    uint16_t calculateChecksum(const void* data, size_t len);
+    uint16_t calculate_checksum(const void* data, size_t len);
 
-    uint32_t get_window_size() noexcept { return MAX_RWND - inBuffer.size() * sizeof(char); }
+    uint32_t get_window_size() noexcept { return MAX_RWND - in_buffer.size() * sizeof(char); }
 
 private:
     TCPSocket socket;
     TCPState state;
 
     // 对端信息
-    std::string peerIp;
-    int peerPort;
+    std::string peer_ip;
+    int peer_port;
 
     // Sliding Window 状态
-    std::deque<SendSegment> sendQueue;                       // 发送队列 (SND.UNA -> SND.NXT)
-    std::map<uint32_t, std::vector<char>> outOfOrderBuffer;  // 乱序接收缓冲
+    std::deque<SendSegment> send_queue;                         // 发送队列 (SND.UNA -> SND.NXT)
+    std::map<uint32_t, std::vector<char>> out_of_order_buffer;  // 乱序接收缓冲
 
     // 简单流控 & 拥塞控制
     uint32_t MAX_RWND = INT32_MAX;
     uint32_t rwnd = MAX_RWND;    // 对方的接收窗口 (默认 64KB)
     uint32_t cwnd = 100 * 1400;  // 拥塞窗口 (加大到 100 MSS 以测试吞吐)
 
-    std::deque<char> inBuffer;  // 接收缓冲区 (存放已确认但应用层未取走的数据)
+    std::deque<char> in_buffer;  // 接收缓冲区 (存放已确认但应用层未取走的数据)
     uint16_t dup_ack_cnt = 0;
     uint16_t MAX_DUP_CNT = 3;
     const int RTO = 200;  // 超时时间 (ms)
@@ -109,6 +117,11 @@ private:
     // Helper to get initial seq
     uint32_t iss;  // Initial Send Sequence
     uint32_t irs;  // Initial Receive Sequence
+
+    std::chrono::steady_clock::time_point start_wait_time{};
+    std::chrono::steady_clock::time_point start_close_time{};
+
+    size_t MAX_CLOSE_WAIT_TIME = 10;  // s
 };
 
 #endif  // TCP_CONNECTION_H

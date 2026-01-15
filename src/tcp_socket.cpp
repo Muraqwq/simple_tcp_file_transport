@@ -1,7 +1,9 @@
 #include "tcp_socket.h"
 
+#ifndef _WIN32
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
 
 #include <cstring>
 
@@ -49,7 +51,7 @@ bool TCPSocket::bind(int port) {
     return true;
 }
 
-int TCPSocket::sendTo(const void *data, int len, const std::string &target_ip, int target_port) {
+int TCPSocket::send_to(const void *data, int len, const std::string &target_ip, int target_port) {
     if (sock_fd == INVALID_SOCKET) return -1;
 
     // TODO: 填写目标地址 sockaddr_in 并调用 sendto
@@ -63,7 +65,7 @@ int TCPSocket::sendTo(const void *data, int len, const std::string &target_ip, i
     return len;
 }
 
-int TCPSocket::recvFrom(void *buffer, int max_len, std::string &src_ip, int &src_port) {
+int TCPSocket::recv_from(void *buffer, int max_len, std::string &src_ip, int &src_port) {
     if (sock_fd == INVALID_SOCKET) return -1;
 
     // TODO: 调用 recvfrom 接收数据
@@ -94,7 +96,7 @@ void TCPSocket::close() {
     }
 }
 
-void TCPSocket::setNonBlocking(bool nonBlocking) {
+void TCPSocket::set_non_blocking(bool nonBlocking) {
     // TODO: 选做，设置 socket 为非阻塞模式
 #ifdef _WIN32
     u_long mode = 1;  // 1: 非阻塞, 0: 阻塞
